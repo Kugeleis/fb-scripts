@@ -3,12 +3,12 @@ from __future__ import annotations
 
 import argparse
 import ipaddress
-import os
 import socket
 import sys
 import time
 from collections.abc import Callable
 from ftplib import FTP
+from pathlib import Path
 from typing import BinaryIO
 
 AUTODISCOVER_TIMEOUT = 1
@@ -255,7 +255,7 @@ def determine_image_name(env_string: str) -> list[str] | None:
     return image_names
 
 
-def autoload_image(ip: str) -> str:
+def autoload_image(ip: str) -> Path:
     """Detect the device model and return a matching image path from the CWD."""
     print("\nStarting automatic image-selection!")
     print("-> Establishing connection to device!")
@@ -288,14 +288,13 @@ def autoload_image(ip: str) -> str:
         input()
         sys.exit(1)
 
-    cwd: str = os.getcwd()
-    files: list[str] = []
-    for filename in os.listdir(cwd):
-        filepath: str = os.path.join(cwd, filename)
-        if not os.path.isfile(filepath):
+    cwd = Path.cwd()
+    files: list[Path] = []
+    for filepath in cwd.iterdir():
+        if not filepath.is_file():
             continue
         for image_name in image_names:
-            if image_name in filepath:
+            if image_name in filepath.name:
                 files.append(filepath)
 
     if len(files) > 1:
@@ -322,7 +321,7 @@ def autoload_image(ip: str) -> str:
     return files[0]
 
 
-def perform_flash(ip: str, image_path: str) -> None:
+def perform_flash(ip: str, image_path: Path) -> None:
     """Flash the given image to the device and reboot it."""
     print("-> Establishing connection to device!")
 
@@ -368,9 +367,9 @@ if __name__ == "__main__":
             print(f"{args.ip} is not a valid IPv4 address!")
             sys.exit(1)
 
-    image_path: str | None = args.image
-    if image_path and not os.path.isfile(image_path):
-        print(f'Image file "{os.path.abspath(image_path)}" does not exist!')
+    image_path: Path | None = Path(args.image) if args.image else None
+    if image_path is not None and not image_path.is_file():
+        print(f'Image file "{image_path.resolve()}" does not exist!')
         sys.exit(1)
 
     start_message(ip_address="192.168.178.1")
