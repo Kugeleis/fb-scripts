@@ -259,22 +259,54 @@ def determine_image_name(env_string: str) -> list[str] | None:
     return image_names
 
 
-def autoload_image(ip: str) -> Path:
-    """Detect the device model and return a matching image path from the CWD."""
-    print("\nStarting automatic image-selection!")
-    print("-> Establishing connection to device!")
-
+def open_ftp(ip: str) -> FritzFTP:
+    """Connect to the bootloader, exiting with a helpful message on failure."""
     try:
-        ftp = FritzFTP(
+        return FritzFTP(
             ip, timeout=FTP_TIMEOUT, max_retry=FTP_MAX_RETRY, retry_cb=retry_status
         )
     except FritzFTP.ConnectionTimeout:
-        print("-> Max retrys exceeded! Check connection and try again.")
+        print("-> Max retries exceeded! Check connection and try again.")
         sys.exit(1)
     except ConnectionRefusedError:
         connection_refused_message()
         sys.exit(1)
 
+
+def connect_only(ip: str) -> None:
+    """Connect to the bootloader and report the server banner."""
+    print(f"-> Connecting to {ip} ...")
+    ftp = open_ftp(ip)
+    print(f"-> FTP connection to {ip} established.")
+    welcome = ftp.getwelcome()
+    if welcome:
+        print(f"-> {welcome}")
+    ftp.close()
+
+
+def show_status(ip: str) -> None:
+    """Connect to the bootloader and print its FTP environment."""
+    print(f"-> Connecting to {ip} ...")
+    ftp = open_ftp(ip)
+    print(f"-> FTP connection to {ip} established.")
+    env = ftp.getenv()
+    ftp.close()
+
+    if not env:
+        print("-> Bootloader returned an empty environment.")
+        return
+
+    print(f"-> Bootloader environment ({len(env)} entries):")
+    for key in sorted(env):
+        print(f"   {key} = {env[key]}")
+
+
+def autoload_image(ip: str) -> Path:
+    """Detect the device model and return a matching image path from the CWD."""
+    print("\nStarting automatic image-selection!")
+    print("-> Establishing connection to device!")
+
+    ftp = open_ftp(ip)
     env = ftp.getenv()
     ftp.close()
 
@@ -329,20 +361,7 @@ def perform_flash(ip: str, image_path: Path) -> None:
     """Flash the given image to the device and reboot it."""
     print("-> Establishing connection to device!")
 
-    try:
-        ftp = FritzFTP(
-            ip, timeout=FTP_TIMEOUT, max_retry=FTP_MAX_RETRY, retry_cb=retry_status
-        )
-    except FritzFTP.ConnectionTimeout:
-        print("-> Max retries exceeded! Check connection and try again.")
-        print("Press any key to exit.")
-        input()
-        sys.exit(1)
-    except ConnectionRefusedError:
-        connection_refused_message()
-        print("Press any key to exit.")
-        input()
-        sys.exit(1)
+    ftp = open_ftp(ip)
 
     print("-> Flash image")
     flash_message()
@@ -354,15 +373,80 @@ def perform_flash(ip: str, image_path: Path) -> None:
     finish_message()
 
 
-if __name__ == "__main__":
+def build_parser() -> argparse.ArgumentParser:
+    """Build the argument parser with one subcommand per task."""
     parser = argparse.ArgumentParser(
-        description="Flash Gluon image to AVM devices using EVA."
+        description="Connect to and flash AVM devices using their EVA bootloader.",
+        epilog="Run 'fritzflash.py VERB --help' for options of a specific verb.",
     )
-    parser.add_argument(
-        "--ip", type=str, help="IP Address of device. Autodiscovery if not specified."
+    subparsers = parser.add_subparsers(dest="verb", metavar="VERB", required=True)
+
+    def add_ip_argument(subparser: argparse.ArgumentParser) -> None:
+        subparser.add_argument(
+            "--ip",
+            type=str,
+            help="IP address of device. Autodiscovery if not specified.",
+        )
+
+    connect_parser = subparsers.add_parser(
+        "connect", help="Connect to the bootloader and exit."
     )
-    parser.add_argument("--image", type=str, help="Image file to transfer.")
-    args: argparse.Namespace = parser.parse_args()
+    add_ip_argument(connect_parser)
+
+    status_parser = subparsers.add_parser(
+        "status", help="Connect and print the bootloader environment."
+    )
+    add_ip_argument(status_parser)
+
+    flash_parser = subparsers.add_parser("flash", help="Flash an image to the device.")
+    add_ip_argument(flash_parser)
+    flash_parser.add_argument("--image", type=str, help="Image file to transfer.")
+    flash_parser.add_argument(
+        "--yes",
+        "-y",
+        action="store_true",
+        help="Skip the initial confirmation prompt.",
+    )
+
+    subparsers.add_parser(
+        "discover", help="Autodiscover an AVM bootloader via UDP broadcast."
+    )
+
+    return parser
+
+
+def resolve_ip(ip: str | None) -> str:
+    """Return the given IP or autodiscover one, exiting on failure."""
+    if ip is not None:
+        return ip
+
+    print("Trying to autodiscover! Abort via Ctrl-c.")
+    discovered = autodiscover_avm_ip()
+
+    if discovered is None:
+        print("\nAutodiscovery failed!")
+        sys.exit(1)
+
+    print("\nAutodiscovery successful!")
+    print(f"-> Device detected at {discovered}.")
+    return discovered
+
+
+def main(argv: list[str] | None = None) -> None:
+    """Parse arguments and dispatch to the requested verb."""
+    parser = build_parser()
+    args_list = list(sys.argv[1:] if argv is None else argv)
+
+    if not args_list:
+        parser.print_help()
+        return
+
+    args: argparse.Namespace = parser.parse_args(args_list)
+    verb: str = args.verb
+
+    if verb == "discover":
+        resolve_ip(None)
+        return
 
     if args.ip:
         try:
@@ -371,30 +455,28 @@ if __name__ == "__main__":
             print(f"{args.ip} is not a valid IPv4 address!")
             sys.exit(1)
 
-    image_path: Path | None = Path(args.image) if args.image else None
-    if image_path is not None and not image_path.is_file():
-        print(f'Image file "{image_path.resolve()}" does not exist!')
-        sys.exit(1)
-
-    start_message(ip_address="192.168.178.1")
-    input()
-
-    ip = args.ip
-    if ip is None:
-        print("Trying to autodiscover! Abort via Ctrl-c.")
-        ip = autodiscover_avm_ip()
-
-        if ip is None:
-            print("\nAutodiscovery failed!")
-            print("Press any key to exit.")
-            input()
+    image_path: Path | None = None
+    if verb == "flash":
+        image_path = Path(args.image) if args.image else None
+        if image_path is not None and not image_path.is_file():
+            print(f'Image file "{image_path.resolve()}" does not exist!')
             sys.exit(1)
 
-        print("\nAutodiscovery succesful!")
-        print(f"-> Device detected at {ip}.")
+        if not args.yes:
+            start_message(ip_address="192.168.178.1")
+            input()
 
-    if image_path is None:
-        # Try to automatically locate an image to use
-        image_path = autoload_image(ip)
+    ip = resolve_ip(args.ip)
 
-    perform_flash(ip, image_path)
+    if verb == "connect":
+        connect_only(ip)
+    elif verb == "status":
+        show_status(ip)
+    elif verb == "flash":
+        if image_path is None:
+            image_path = autoload_image(ip)
+        perform_flash(ip, image_path)
+
+
+if __name__ == "__main__":
+    main()

@@ -5,6 +5,28 @@ A collection of scripts for using on routers from the German company Fritz (form
 - a lan toggle script for windows
 - original fritzflash.py from <https://github.com/freifunk-gluon/fritz-tools/blob/master/fritzflash.py> modernized
 
+## fritzflash.py
+
+The script uses PEP723 header. To run it you do **NOT** need Python on your machine. Jou just need an environment manager which can understand this header. I recommend [uv](https://astral.sh/uv/). With this you just run `uv run fritzflash.py` (being in the dir) or even directly from the repo `uv run <https://path-to-the-raw-file>`.
+
+>[!WARNING]
+> Never run scripts directly from the web without trust!
+
+Tasks are selected with verbs; a verb is always required. Running the script
+without arguments prints the help and does nothing else. Run
+`uv run fritzflash.py VERB --help` for verb-specific options.
+
+```bash
+uv run fritzflash.py --help                       # show available verbs
+uv run fritzflash.py connect --ip 192.168.178.1   # connect and print the FTP banner
+uv run fritzflash.py status  --ip 192.168.178.1   # connect and print the bootloader env
+uv run fritzflash.py discover                     # find the bootloader via UDP broadcast
+uv run fritzflash.py flash --image image.bin      # flash an image
+uv run fritzflash.py flash --image image.bin -y   # flash without the start prompt
+```
+
+If `--ip` is omitted, all device verbs attempt autodiscovery.
+
 ## toggle_lan.ps1
 
 Switches the wired Ethernet adapter between normal DHCP operation and the
