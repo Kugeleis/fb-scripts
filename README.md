@@ -38,8 +38,9 @@ Requirements and safety notes:
 
 - Windows PowerShell 5.1+ with the `NetAdapter` module and administrator
   rights (the script re-launches itself elevated).
-- Adapter selection is limited to physical adapters. The LAN adapter must be
-  connected (`Status -eq 'Up'`) unless `-Force` is used.
+- Adapter selection is limited to physical adapters. The LAN adapter may be
+  disconnected: the static IP is applied anyway, so it is ready when the router
+  is powered on.
 - Wi-Fi is disabled only after the static LAN address was applied successfully.
 - The previous IP/DNS/route/Wi-Fi state is restored automatically if a change
   fails.
@@ -47,8 +48,11 @@ Requirements and safety notes:
   aborts in that case unless `-Force` is given.
 - Only IPv4 is changed; existing IPv6 connectivity is left untouched.
 - Use `-WhatIf` for a dry run; confirmation is requested before changes.
+- The terminal waits for Enter at the end and on errors, so the result stays
+  visible when the script is started by double-click. Use `-NoPause` for
+  unattended runs.
 - `-Force` skips the confirmation prompt and the safety checks. Use it only
-  deliberately, for example in unattended runs.
+  deliberately.
 
 Examples:
 
@@ -57,4 +61,5 @@ Examples:
 .\toggle_lan.ps1 -Mode Static        # force flash mode
 .\toggle_lan.ps1 -Mode Dhcp          # force normal mode
 .\toggle_lan.ps1 -LanName "Ethernet 2" -WifiName "WLAN"
+.\toggle_lan.ps1 -Mode Static -NoPause -Force   # unattended
 ```

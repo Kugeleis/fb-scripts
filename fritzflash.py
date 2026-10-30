@@ -151,24 +151,36 @@ def retry_status(current_try: int, max_try: int) -> None:
     print(f"--> Try {current_try} of {max_try}")
 
 
+def bind_or_exit(sock: socket.socket, address: tuple[str, int]) -> None:
+    """Bind a socket, exiting with a helpful message on common errors."""
+    try:
+        sock.bind(address)
+    except OSError as e:
+        winerror = getattr(e, "winerror", None)
+        if e.errno in (99, 10049) or winerror == 10049:
+            print(
+                f"\rIP address {address[0]} is not configured on any interface.\n"
+                "Connect your LAN adapter and assign it that static IP "
+                "(see toggle_lan.ps1)."
+            )
+        elif e.errno in (98, 10048) or winerror == 10048:
+            print(f"\rPort {address[1]} is already in use.")
+        else:
+            print(f"\rCould not bind {address[0]}:{address[1]}: {e}")
+        sys.exit(1)
+
+
 def autodiscover_avm_ip() -> str | None:
     """Find an AVM bootloader via UDP broadcast, returning its IP or ``None``."""
     sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        sender.bind(("192.168.178.2", 0))
-    except OSError as e:
-        if e.errno == 99:
-            print("\rIP address 192.168.178.2 is not configured on any interface.")
-            sys.exit(1)
-        else:
-            raise
+    bind_or_exit(sender, ("192.168.178.2", 0))
     sender.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sender.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
     sender.settimeout(AUTODISCOVER_TIMEOUT)
 
     receiver = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     receiver.settimeout(AUTODISCOVER_TIMEOUT)
-    receiver.bind(("192.168.178.2", 5035))
+    bind_or_exit(receiver, ("192.168.178.2", 5035))
 
     i = 1
     while True:

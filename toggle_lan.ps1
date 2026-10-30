@@ -3,7 +3,7 @@
   Schaltet zwischen "FRITZ!Box-Modus" und "Normalbetrieb" um.
 
 .DESCRIPTION
-  Static : LAN-Adapter auf feste IPv4-Adresse (ohne Gateway/DNS) setzen, danach WLAN deaktivieren
+  Static : LAN-Adapter auf feste IPv4-Adresse mit Gateway (ohne DNS) setzen, danach WLAN deaktivieren
   Dhcp   : feste Adresse entfernen, LAN wieder auf DHCP, WLAN-Adapter aktivieren
   Toggle : (Standard) wechselt automatisch in den jeweils anderen Modus
 
@@ -12,7 +12,7 @@
   - Aendert die Netzwerkkonfiguration und unterbricht die Verbindung kurzzeitig.
   - Nicht ueber RDP/SSH/WinRM auf demselben Adapter ausfuehren; das Skript bricht
     dann ab, ausser -Force wird bewusst gesetzt.
-  - Die Standard-IP 192.168.178.2/24 passt zu fritzflash.py (FRITZ!Box auf 192.168.178.1).
+  - Die Standard-IP 192.168.178.2/24 mit Gateway 192.168.178.1 passt zu fritzflash.py.
   - Bei einem Fehler wird die vorherige Konfiguration automatisch wiederhergestellt.
   - Es wird nur IPv4 angepasst; eine bestehende IPv6-Verbindung bleibt unberuehrt.
   - -Force ueberspringt Rueckfrage und Sicherheitspruefungen (nur bewusst verwenden,
@@ -49,10 +49,36 @@ param(
     [ValidateRange(1, 32)]
     [int]$PrefixLength = 24,
 
-    [switch]$Force
+    [ValidateScript({
+        $parsed = $null
+        if (-not [System.Net.IPAddress]::TryParse($_, [ref]$parsed) -or
+            $parsed.AddressFamily -ne [System.Net.Sockets.AddressFamily]::InterNetwork) {
+            throw "Ungueltige IPv4-Gateway-Adresse: $_"
+        }
+        $true
+    })]
+    [string]$Gateway = '192.168.178.1',
+
+    [switch]$Force,
+
+    [switch]$NoPause
 )
 
 $ErrorActionPreference = 'Stop'
+
+function Wait-ForUser {
+    if (-not $NoPause) {
+        Write-Host ''
+        [void](Read-Host 'Zum Schliessen Enter druecken')
+    }
+}
+
+trap {
+    Write-Host ''
+    Write-Host "FEHLER: $($_.Exception.Message)" -ForegroundColor Red
+    Wait-ForUser
+    exit 1
+}
 
 $requiredModules = 'NetAdapter', 'NetTCPIP', 'DnsClient'
 $missingModules = @($requiredModules | Where-Object { -not (Get-Module -ListAvailable -Name $_) })
@@ -89,11 +115,13 @@ if (-not $isAdmin -and -not $WhatIfPreference) {
         '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Quote-Arg $PSCommandPath),
         '-Mode', $Mode,
         '-IPAddress', (Quote-Arg $IPAddress),
-        '-PrefixLength', $PrefixLength
+        '-PrefixLength', $PrefixLength,
+        '-Gateway', (Quote-Arg $Gateway)
     )
     if ($LanName)  { $argList += @('-LanName',  (Quote-Arg $LanName)) }
     if ($WifiName) { $argList += @('-WifiName', (Quote-Arg $WifiName)) }
     if ($Force)    { $argList += '-Force' }
+    if ($NoPause)  { $argList += '-NoPause' }
     if ($WhatIfPreference) { $argList += '-WhatIf' }
 
     $hostExe = (Get-Process -Id $PID).Path
@@ -130,8 +158,8 @@ function Resolve-PhysicalAdapter {
 
 $lan = Resolve-PhysicalAdapter -Name $LanName -Kind 'LAN' -AutoFilter { $_.PhysicalMediaType -eq '802.3' }
 if (-not $lan) { throw 'Kein LAN-Adapter gefunden. Bitte -LanName angeben.' }
-if ($lan.Status -ne 'Up' -and -not $Force -and -not $WhatIfPreference) {
-    throw "LAN-Adapter '$($lan.Name)' ist nicht verbunden (Status: $($lan.Status)). Kabel pruefen oder -Force verwenden."
+if ($lan.Status -ne 'Up') {
+    Write-Warning "LAN-Adapter '$($lan.Name)' ist nicht verbunden (Status: $($lan.Status)). Die statische IP wird trotzdem gesetzt; Router danach einschalten."
 }
 
 $wifi = Resolve-PhysicalAdapter -Name $WifiName -Kind 'WLAN' -AutoFilter { $_.PhysicalMediaType -eq 'Native 802.11' }
@@ -165,6 +193,7 @@ if (-not $PSCmdlet.ShouldProcess($target, 'Netzwerkkonfiguration aendern')) {
     } else {
         Write-Host 'Abgebrochen (Bestaetigung verneint).'
     }
+    Wait-ForUser
     return
 }
 
@@ -176,6 +205,20 @@ $snapshot = [pscustomobject]@{
     Routes     = @(Get-NetRoute -InterfaceIndex $idx -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue)
     WifiStatus = if ($wifi) { (Get-NetAdapter -Physical | Where-Object { $_.ifIndex -eq $wifi.ifIndex }).Status } else { $null }
     LanName    = $lan.Name
+}
+
+function Set-InterfaceDhcpRegistry {
+    param(
+        [int]$Index,
+        [bool]$Enabled
+    )
+    $adapter = Get-NetAdapter -Physical | Where-Object { $_.ifIndex -eq $Index }
+    if (-not $adapter) { return }
+
+    $path = "HKLM:\SYSTEM\CurrentControlSet\services\Tcpip\Parameters\Interfaces\$($adapter.InterfaceGuid)"
+    if (Test-Path -LiteralPath $path) {
+        Set-ItemProperty -Path $path -Name EnableDHCP -Value ([int]$Enabled) -Type DWord -Force
+    }
 }
 
 function Clear-LanIPv4 {
@@ -198,6 +241,7 @@ function Restore-LanConfiguration {
         Get-NetIPAddress -InterfaceIndex $Index -AddressFamily IPv4 -ErrorAction SilentlyContinue |
             Remove-NetIPAddress -Confirm:$false -ErrorAction SilentlyContinue
 
+        Set-InterfaceDhcpRegistry -Index $Index -Enabled ($Snapshot.Dhcp -eq 'Enabled')
         Set-NetIPInterface -InterfaceIndex $Index -AddressFamily IPv4 -Dhcp $Snapshot.Dhcp -Confirm:$false
 
         if ($Snapshot.Dhcp -eq 'Disabled') {
@@ -249,8 +293,11 @@ try {
             $alreadyConfigured = @($snapshot.IPs | Where-Object {
                 $_.IPAddress -eq $IPAddress -and $_.PrefixLength -eq $PrefixLength
             }).Count -gt 0
+            $alreadyHasGateway = @($snapshot.Routes | Where-Object {
+                $_.NextHop -eq $Gateway
+            }).Count -gt 0
 
-            if ($alreadyConfigured -and $snapshot.Dhcp -eq 'Disabled' -and
+            if ($alreadyConfigured -and $alreadyHasGateway -and $snapshot.Dhcp -eq 'Disabled' -and
                 (-not $wifi -or $snapshot.WifiStatus -eq 'Disabled')) {
                 Write-Host 'Bereits im FRITZ!Box-Modus - keine Aenderung noetig.'
             } else {
@@ -259,18 +306,34 @@ try {
                     throw "IP-Adresse $IPAddress antwortet bereits im Netzwerk - moeglicher Konflikt. Abbruch (mit -Force erzwingbar)."
                 }
 
-                Write-Host "LAN auf $IPAddress/$PrefixLength setzen (ohne Gateway) ..."
-                Set-NetIPInterface -InterfaceIndex $idx -AddressFamily IPv4 -Dhcp Disabled -Confirm:$false
+                Write-Host "LAN auf $IPAddress/$PrefixLength mit Gateway $Gateway setzen ..."
                 $changed = $true
+                Set-InterfaceDhcpRegistry -Index $idx -Enabled $false
+                Set-NetIPInterface -InterfaceIndex $idx -AddressFamily IPv4 -Dhcp Disabled -Confirm:$false
                 Clear-LanIPv4 -Index $idx
                 New-NetIPAddress -InterfaceIndex $idx -AddressFamily IPv4 `
-                                 -IPAddress $IPAddress -PrefixLength $PrefixLength -Confirm:$false | Out-Null
+                                 -IPAddress $IPAddress -PrefixLength $PrefixLength `
+                                 -DefaultGateway $Gateway -Confirm:$false | Out-Null
                 Set-DnsClientServerAddress -InterfaceIndex $idx -ResetServerAddresses -Confirm:$false
 
                 $applied = @(Get-NetIPAddress -InterfaceIndex $idx -AddressFamily IPv4 -ErrorAction SilentlyContinue |
                              Where-Object { $_.IPAddress -eq $IPAddress -and $_.PrefixLength -eq $PrefixLength })
                 if ($applied.Count -eq 0) {
                     throw "Statische Adresse $IPAddress/$PrefixLength wurde nicht gesetzt."
+                }
+
+                $gatewayApplied = @(Get-NetRoute -InterfaceIndex $idx -AddressFamily IPv4 `
+                                    -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue |
+                                    Where-Object { $_.NextHop -eq $Gateway })
+                if ($gatewayApplied.Count -eq 0) {
+                    New-NetRoute -InterfaceIndex $idx -AddressFamily IPv4 `
+                                 -DestinationPrefix '0.0.0.0/0' -NextHop $Gateway -Confirm:$false | Out-Null
+                    $gatewayApplied = @(Get-NetRoute -InterfaceIndex $idx -AddressFamily IPv4 `
+                                        -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue |
+                                        Where-Object { $_.NextHop -eq $Gateway })
+                }
+                if ($gatewayApplied.Count -eq 0) {
+                    throw "Gateway $Gateway wurde nicht gesetzt."
                 }
 
                 if ($wifi -and $snapshot.WifiStatus -ne 'Disabled') {
@@ -289,9 +352,10 @@ try {
                 Write-Host 'LAN nutzt bereits DHCP - keine Aenderung noetig.'
             } else {
                 Write-Host 'LAN zurueck auf DHCP ...'
-                Clear-LanIPv4 -Index $idx
-                Set-NetIPInterface -InterfaceIndex $idx -AddressFamily IPv4 -Dhcp Enabled -Confirm:$false
                 $changed = $true
+                Clear-LanIPv4 -Index $idx
+                Set-InterfaceDhcpRegistry -Index $idx -Enabled $true
+                Set-NetIPInterface -InterfaceIndex $idx -AddressFamily IPv4 -Dhcp Enabled -Confirm:$false
                 Set-DnsClientServerAddress -InterfaceIndex $idx -ResetServerAddresses -Confirm:$false
                 if ($lan.Status -eq 'Disabled') {
                     Enable-NetAdapter -InputObject $lan -Confirm:$false
@@ -331,11 +395,22 @@ if ($Mode -eq 'Dhcp') {
 Write-Host ''
 $v4 | Select-Object InterfaceAlias, IPAddress, PrefixLength, PrefixOrigin | Format-Table -AutoSize
 
-if ($wifi) {
-    Get-NetAdapter -Physical | Where-Object { $_.ifIndex -eq $wifi.ifIndex } |
-        Select-Object Name, Status | Format-Table -AutoSize
+$shownAdapters = @(Get-NetAdapter -Physical | Where-Object {
+    $_.ifIndex -eq $idx -or ($wifi -and $_.ifIndex -eq $wifi.ifIndex)
+})
+$shownAdapters | Select-Object Name, Status | Format-Table -AutoSize
+
+$currentLan = $shownAdapters | Where-Object { $_.ifIndex -eq $idx }
+if ($Mode -eq 'Static') {
+    if ($currentLan.Status -ne 'Up') {
+        Write-Host "LAN '$($currentLan.Name)' ist noch nicht verbunden. Router jetzt einschalten." -ForegroundColor Yellow
+    }
+    Write-Host ''
+    Write-Host 'Naechster Schritt: Router einschalten und dann z.B. "uv run .\fritzflash.py status" starten.' -ForegroundColor Cyan
 }
 
 if ($Mode -eq 'Dhcp' -and @($v4 | Where-Object { $_.PrefixOrigin -eq 'Dhcp' }).Count -eq 0) {
     Write-Warning 'Noch keine DHCP-Adresse erhalten. DHCP kann etwas laenger dauern.'
 }
+
+Wait-ForUser
