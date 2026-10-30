@@ -292,24 +292,22 @@ def open_ftp(ip: str) -> FritzFTP:
         sys.exit(1)
 
 
-def connect_only(ip: str) -> None:
+def connect_only(ftp: FritzFTP) -> None:
     """Connect to the bootloader and report the server banner."""
+    ip = ftp.host
     print(f"-> Connecting to {ip} ...")
-    ftp = open_ftp(ip)
     print(f"-> FTP connection to {ip} established.")
     welcome = ftp.getwelcome()
     if welcome:
         print(f"-> {welcome}")
-    ftp.close()
 
 
-def show_status(ip: str) -> None:
+def show_status(ftp: FritzFTP) -> None:
     """Connect to the bootloader and print its FTP environment."""
+    ip = ftp.host
     print(f"-> Connecting to {ip} ...")
-    ftp = open_ftp(ip)
     print(f"-> FTP connection to {ip} established.")
     env = ftp.getenv()
-    ftp.close()
 
     if not env:
         print("-> Bootloader returned an empty environment.")
@@ -320,24 +318,18 @@ def show_status(ip: str) -> None:
         print(f"   {key} = {env[key]}")
 
 
-def setenv_value(ip: str, key: str, value: str) -> None:
+def setenv_value(ftp: FritzFTP, key: str, value: str) -> None:
     """Set a bootloader environment variable."""
-    print(f"-> Connecting to {ip} ...")
-    ftp = open_ftp(ip)
-    print(f"-> FTP connection to {ip} established.")
     ftp.setenv(key, value)
     print(f"-> Set env {key} = {value}")
-    ftp.close()
 
 
-def autoload_image(ip: str) -> Path:
+def autoload_image(ftp: FritzFTP) -> Path:
     """Detect the device model and return a matching image path from the CWD."""
     print("\nStarting automatic image-selection!")
     print("-> Establishing connection to device!")
 
-    ftp = open_ftp(ip)
     env = ftp.getenv()
-    ftp.close()
 
     if "HWRevision" not in env:
         print("\nAutomatic image-selection unsuccessful!")
@@ -386,12 +378,8 @@ def autoload_image(ip: str) -> Path:
     return files[0]
 
 
-def perform_flash(ip: str, image_path: Path) -> None:
+def perform_flash(ftp: FritzFTP, image_path: Path) -> None:
     """Flash the given image to the device and reboot it."""
-    print("-> Establishing connection to device!")
-
-    ftp = open_ftp(ip)
-
     print("-> Flash image")
     flash_message()
     with open(image_path, "rb") as image:
@@ -402,50 +390,34 @@ def perform_flash(ip: str, image_path: Path) -> None:
     finish_message()
 
 
+
 def build_parser() -> argparse.ArgumentParser:
-    """Build the argument parser with one subcommand per task."""
+    """Build the argument parser."""
     parser = argparse.ArgumentParser(
         description="Connect to and flash AVM devices using their EVA bootloader.",
-        epilog="Run 'fritzflash.py VERB --help' for options of a specific verb.",
+        epilog="Run 'fritzflash.py --help' for options.",
     )
-    subparsers = parser.add_subparsers(dest="verb", metavar="VERB", required=True)
-
-    def add_ip_argument(subparser: argparse.ArgumentParser) -> None:
-        subparser.add_argument(
-            "--ip",
-            type=str,
-            help="IP address of device. Autodiscovery if not specified.",
-        )
-
-    connect_parser = subparsers.add_parser(
-        "connect", help="Connect to the bootloader and exit."
+    parser.add_argument(
+        "--ip",
+        type=str,
+        help="IP address of device. Autodiscovery if not specified.",
     )
-    add_ip_argument(connect_parser)
-
-    status_parser = subparsers.add_parser(
-        "status", help="Connect and print the bootloader environment."
+    parser.add_argument(
+        "verbs",
+        nargs="+",
+        help="One or more verbs to execute in order, sharing one FTP connection.",
     )
-    add_ip_argument(status_parser)
-
-    flash_parser = subparsers.add_parser("flash", help="Flash an image to the device.")
-    add_ip_argument(flash_parser)
-    flash_parser.add_argument("--image", type=str, help="Image file to transfer.")
-    flash_parser.add_argument(
+    parser.add_argument(
+        "--image",
+        type=str,
+        help="Image file to transfer (used by 'flash').",
+    )
+    parser.add_argument(
         "--yes",
         "-y",
         action="store_true",
-        help="Skip the initial confirmation prompt.",
+        help="Skip the initial confirmation prompt (used by 'flash').",
     )
-
-    setenv_parser = subparsers.add_parser("setenv", help="Set a bootloader environment variable.")
-    add_ip_argument(setenv_parser)
-    setenv_parser.add_argument("key", type=str, help="Environment variable name.")
-    setenv_parser.add_argument("value", type=str, help="Environment variable value.")
-
-    subparsers.add_parser(
-        "discover", help="Autodiscover an AVM bootloader via UDP broadcast."
-    )
-
     return parser
 
 
@@ -466,52 +438,144 @@ def resolve_ip(ip: str | None) -> str:
     return discovered
 
 
+# ── Verb handler registry ──────────────────────────────────────────────
+# Each verb handler receives a VerbContext and executes the verb.
+# New verbs are added by registering a handler here (open/closed principle).
+
+from dataclasses import dataclass
+
+
+@dataclass
+class VerbContext:
+    ftp: FritzFTP | None
+    ip: str
+    verb_args: list[str]
+    image_path_arg: str | None
+    yes: bool
+
+
+def _dispatch_connect(ctx: VerbContext) -> None:
+    if ctx.ftp is None:
+        return
+    connect_only(ctx.ftp)
+
+
+def _dispatch_status(ctx: VerbContext) -> None:
+    if ctx.ftp is None:
+        return
+    show_status(ctx.ftp)
+
+
+def _dispatch_flash(ctx: VerbContext) -> None:
+    if ctx.ftp is None:
+        return
+    image_path: Path | None = None
+    if ctx.image_path_arg:
+        image_path = Path(ctx.image_path_arg)
+        if not image_path.is_file():
+            print(f'Image file "{image_path.resolve()}" does not exist!')
+            sys.exit(1)
+    if image_path is None:
+        image_path = autoload_image(ctx.ftp)
+    perform_flash(ctx.ftp, image_path)
+
+
+def _dispatch_setenv(ctx: VerbContext) -> None:
+    if ctx.ftp is None:
+        return
+    if len(ctx.verb_args) < 2:
+        print("setenv requires KEY and VALUE arguments.")
+        sys.exit(1)
+    setenv_value(ctx.ftp, ctx.verb_args[0], ctx.verb_args[1])
+
+
+def _dispatch_discover(ctx: VerbContext) -> None:
+    resolve_ip(None)
+
+
+VERB_HANDLERS: dict[str, Callable[[VerbContext], None]] = {
+    "connect": _dispatch_connect,
+    "status": _dispatch_status,
+    "flash": _dispatch_flash,
+    "setenv": _dispatch_setenv,
+    "discover": _dispatch_discover,
+}
+
+
 def main(argv: list[str] | None = None) -> None:
-    """Parse arguments and dispatch to the requested verb."""
-    parser = build_parser()
-    args_list = list(sys.argv[1:] if argv is None else argv)
+    """Parse arguments and dispatch to the requested verb(s)."""
+    parser: argparse.ArgumentParser = build_parser()
+    args_list: list[str] = list(sys.argv[1:] if argv is None else argv)
 
     if not args_list:
         parser.print_help()
         return
 
     args: argparse.Namespace = parser.parse_args(args_list)
-    verb: str = args.verb
 
-    if verb == "discover":
-        resolve_ip(None)
-        return
+    # Walk the positional verbs and their arguments.
+    verbs: list[tuple[str, list[str]]] = []
+    pos: Any = args.verbs
+    i = 0
+    while i < len(pos):
+        verb = pos[i]
+        i += 1
+        if verb == "setenv":
+            if i + 1 >= len(pos):
+                print("setenv requires KEY and VALUE arguments.")
+                sys.exit(1)
+            verbs.append((verb, [pos[i], pos[i + 1]]))
+            i += 2
+        else:
+            verbs.append((verb, []))
 
-    if args.ip:
-        try:
-            socket.inet_aton(args.ip)
-        except OSError:
-            print(f"{args.ip} is not a valid IPv4 address!")
-            sys.exit(1)
+    # IP validation / autodiscovery.
+    ip: str | None = None
+    for verb, _ in verbs:
+        if verb == "discover":
+            ip: str | None = resolve_ip(None)  # exits on failure
+            continue
+        if args.ip:
+            try:
+                socket.inet_aton(args.ip)
+            except OSError:
+                print(f"{args.ip} is not a valid IPv4 address!")
+                sys.exit(1)
+            ip = args.ip
+        else:
+            ip = resolve_ip(None)  # exits on failure
+        break
 
-    image_path: Path | None = None
-    if verb == "flash":
-        image_path = Path(args.image) if args.image else None
-        if image_path is not None and not image_path.is_file():
-            print(f'Image file "{image_path.resolve()}" does not exist!')
-            sys.exit(1)
+    # ip is guaranteed to be a non-None str after the loop
+    assert ip is not None, "IP should not be None after validation loop"
 
-        if not args.yes:
-            start_message(ip_address="192.168.178.1")
-            input()
+    # flash confirmation prompt.
+    for verb, _ in verbs:
+        if verb == "flash":
+            if not args.yes:
+                start_message(ip_address="192.168.178.1")
+                input()
+            break
 
-    ip = resolve_ip(args.ip)
-
-    if verb == "connect":
-        connect_only(ip)
-    elif verb == "status":
-        show_status(ip)
-    elif verb == "flash":
-        if image_path is None:
-            image_path = autoload_image(ip)
-        perform_flash(ip, image_path)
-    elif verb == "setenv":
-        setenv_value(ip, args.key, args.value)
+    ftp: FritzFTP | None = None
+    try:
+        for verb, verb_args in verbs:
+            handler = VERB_HANDLERS.get(verb)
+            if handler is None:
+                print(f"Unknown verb: {verb}")
+                sys.exit(1)
+            if verb == "discover":
+                handler(VerbContext(ftp=ftp, ip=ip or "", verb_args=verb_args, image_path_arg=args.image or "", yes=args.yes))
+                continue
+            if ftp is None:
+                ftp = open_ftp(ip)
+            handler(VerbContext(ftp=ftp, ip=ip, verb_args=verb_args, image_path_arg=args.image or "", yes=args.yes))
+    finally:
+        if ftp is not None:
+            try:
+                ftp.close()
+            except OSError as e:
+                print(f"-> Warning: error closing FTP connection: {e}")
 
 
 if __name__ == "__main__":
