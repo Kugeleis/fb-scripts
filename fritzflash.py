@@ -1,4 +1,8 @@
 #! /usr/bin/env python3
+# /// script
+# requires-python = ">=3.15"
+# dependencies = []
+# ///
 from __future__ import annotations
 
 import argparse
