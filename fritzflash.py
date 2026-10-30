@@ -13,7 +13,7 @@ import time
 from collections.abc import Callable
 from ftplib import FTP
 from pathlib import Path
-from typing import BinaryIO
+from typing import Any, BinaryIO
 
 AUTODISCOVER_TIMEOUT = 1
 FTP_TIMEOUT = 2
@@ -70,6 +70,8 @@ class FritzFTP(FTP):
 
         for line in env[0].decode("ascii").splitlines():
             parts = line.split()
+            if len(parts) < 2:
+                continue
             fritzenv[parts[0]] = parts[1]
 
         return fritzenv
@@ -156,7 +158,7 @@ def bind_or_exit(sock: socket.socket, address: tuple[str, int]) -> None:
     try:
         sock.bind(address)
     except OSError as e:
-        winerror = getattr(e, "winerror", None)
+        winerror: Any | None = getattr(e, "winerror", None)
         if e.errno in (99, 10049) or winerror == 10049:
             print(
                 f"\rIP address {address[0]} is not configured on any interface.\n"
