@@ -69,12 +69,17 @@ class FritzFTP(FTP):
             pass
 
         for line in env[0].decode("ascii").splitlines():
-            parts = line.split()
+            parts: list[str] = line.split()
             if len(parts) < 2:
                 continue
             fritzenv[parts[0]] = parts[1]
 
         return fritzenv
+
+    def setenv(self, key: str, value: str) -> None:
+        """Set a bootloader environment variable."""
+        self.voidcmd(f"SETENV {key} {value}")
+
 
     def set_flash_timeout(self) -> None:
         """Extend the socket timeout for the long-running flash operation."""
@@ -315,6 +320,16 @@ def show_status(ip: str) -> None:
         print(f"   {key} = {env[key]}")
 
 
+def setenv_value(ip: str, key: str, value: str) -> None:
+    """Set a bootloader environment variable."""
+    print(f"-> Connecting to {ip} ...")
+    ftp = open_ftp(ip)
+    print(f"-> FTP connection to {ip} established.")
+    ftp.setenv(key, value)
+    print(f"-> Set env {key} = {value}")
+    ftp.close()
+
+
 def autoload_image(ip: str) -> Path:
     """Detect the device model and return a matching image path from the CWD."""
     print("\nStarting automatic image-selection!")
@@ -422,6 +437,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Skip the initial confirmation prompt.",
     )
 
+    setenv_parser = subparsers.add_parser("setenv", help="Set a bootloader environment variable.")
+    add_ip_argument(setenv_parser)
+    setenv_parser.add_argument("key", type=str, help="Environment variable name.")
+    setenv_parser.add_argument("value", type=str, help="Environment variable value.")
+
     subparsers.add_parser(
         "discover", help="Autodiscover an AVM bootloader via UDP broadcast."
     )
@@ -490,6 +510,8 @@ def main(argv: list[str] | None = None) -> None:
         if image_path is None:
             image_path = autoload_image(ip)
         perform_flash(ip, image_path)
+    elif verb == "setenv":
+        setenv_value(ip, args.key, args.value)
 
 
 if __name__ == "__main__":
