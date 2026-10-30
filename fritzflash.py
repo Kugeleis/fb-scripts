@@ -11,6 +11,7 @@ import socket
 import sys
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from ftplib import FTP
 from pathlib import Path
 from typing import Any, BinaryIO
@@ -80,7 +81,6 @@ class FritzFTP(FTP):
         """Set a bootloader environment variable."""
         self.voidcmd(f"SETENV {key} {value}")
 
-
     def set_flash_timeout(self) -> None:
         """Extend the socket timeout for the long-running flash operation."""
         if self.sock is not None:
@@ -96,6 +96,10 @@ class FritzFTP(FTP):
         """Reboot the device and close the FTP connection."""
         self.voidcmd("REBOOT")
         self.close()
+
+
+class UnknownModel(Exception):
+    """Raised when a device's HWRevision has no known image mapping."""
 
 
 def connection_refused_message() -> None:
@@ -213,11 +217,12 @@ def autodiscover_avm_ip() -> str | None:
             print("\rAborting...\n")
             return None
 
-    return None
 
+def determine_image_name(env_string: str) -> list[str]:
+    """Return candidate image filenames for a device's HWRevision.
 
-def determine_image_name(env_string: str) -> list[str] | None:
-    """Return candidate image filenames for a device's HWRevision, or ``None``."""
+    Raises ``UnknownModel`` if the revision is not in the known model list.
+    """
     models: dict[str, dict[str, list[str]]] = {
         "172": {
             "gluon": ["avm-fritz-box-7320-sysupgrade.bin"],
@@ -268,7 +273,7 @@ def determine_image_name(env_string: str) -> list[str] | None:
         },
     }
     if env_string not in models:
-        return None
+        raise UnknownModel(env_string)
 
     image_names: list[str] = []
     if "gluon" in models[env_string]:
@@ -294,9 +299,7 @@ def open_ftp(ip: str) -> FritzFTP:
 
 def connect_only(ftp: FritzFTP) -> None:
     """Connect to the bootloader and report the server banner."""
-    ip = ftp.host
-    print(f"-> Connecting to {ip} ...")
-    print(f"-> FTP connection to {ip} established.")
+    _connect_message(ftp.host)
     welcome = ftp.getwelcome()
     if welcome:
         print(f"-> {welcome}")
@@ -304,10 +307,8 @@ def connect_only(ftp: FritzFTP) -> None:
 
 def show_status(ftp: FritzFTP) -> None:
     """Connect to the bootloader and print its FTP environment."""
-    ip = ftp.host
-    print(f"-> Connecting to {ip} ...")
-    print(f"-> FTP connection to {ip} established.")
-    env = ftp.getenv()
+    _connect_message(ftp.host)
+    env: dict[str, str] = ftp.getenv()
 
     if not env:
         print("-> Bootloader returned an empty environment.")
@@ -329,16 +330,16 @@ def autoload_image(ftp: FritzFTP) -> Path:
     print("\nStarting automatic image-selection!")
     print("-> Establishing connection to device!")
 
-    env = ftp.getenv()
+    env: dict[str, str] = ftp.getenv()
 
     if "HWRevision" not in env:
         print("\nAutomatic image-selection unsuccessful!")
         print("-> No model saved on device!")
         sys.exit(1)
 
-    image_names = determine_image_name(env["HWRevision"])
-
-    if image_names is None:
+    try:
+        image_names: list[str] = determine_image_name(env["HWRevision"])
+    except UnknownModel:
         print("\nAutomatic image-selection unsuccessful!")
         print(f"-> Unknown Model {env['HWRevision']}!")
         print("Press any key to exit.")
@@ -438,12 +439,15 @@ def resolve_ip(ip: str | None) -> str:
     return discovered
 
 
+def _connect_message(ip: str) -> None:
+    """Print connection status messages."""
+    print(f"-> Connecting to {ip} ...")
+    print(f"-> FTP connection to {ip} established.")
+
+
 # ── Verb handler registry ──────────────────────────────────────────────
 # Each verb handler receives a VerbContext and executes the verb.
 # New verbs are added by registering a handler here (open/closed principle).
-
-from dataclasses import dataclass
-
 
 @dataclass
 class VerbContext:
@@ -515,7 +519,7 @@ def main(argv: list[str] | None = None) -> None:
 
     # Walk the positional verbs and their arguments.
     verbs: list[tuple[str, list[str]]] = []
-    pos: Any = args.verbs
+    pos: list[str] = args.verbs
     i = 0
     while i < len(pos):
         verb = pos[i]
